@@ -5,40 +5,40 @@ open System.Collections.Generic
 
 type Vow<'a> () = 
     let mailbox = MailboxProcessor.Start(fun inbox ->
-        let rec loop (status, keepers, breakers, channels) =
+        let rec loop state =
             async {
                 let! msg = inbox.Receive()
                 // match instead of if here - compiler tries to restrict 'a with equality
-                match status with
+                match state.Status with
                 | Pending ->
                     // if the promise is pending, either resolve it or enqueue a handler
                     match msg with
                     | AddKeeper f -> 
-                        return! loop (status, f :: keepers, breakers, channels)
+                        return! loop { state with Keepers = f :: state.Keepers }
                     | AddBreaker f -> 
-                        return! loop (status, keepers, f :: breakers, channels)
+                        return! loop { state with Breakers = f :: state.Breakers }
                     | Value channel -> 
-                        return! loop (status, keepers, breakers, channel :: channels)
+                        return! loop { state with Channels = channel :: state.Channels }
                     | Resolve result -> 
                         match result with
                         | Kept value -> 
-                            keepers  |> List.iter (fun f -> f value)
-                            channels |> List.iter (fun c -> c.Reply(Right value))
+                            state.Keepers  |> List.iter (fun f -> f value)
+                            state.Channels |> List.iter (fun c -> c.Reply(Right value))
                         | Broken msg -> 
-                            breakers |> List.iter (fun f -> f msg)
-                            channels |> List.iter (fun c -> c.Reply(Left msg))
-                        return! loop (Resolved result, [], [], [])
+                            state.Breakers |> List.iter (fun f -> f msg)
+                            state.Channels |> List.iter (fun c -> c.Reply(Left msg))
+                        return! loop (MailboxState.EmptyWithStatus(Resolved result))
                 | _ ->
                     // ...otherwise the promise is resolved - we only handle AddKeeper if it's kept and AddBreaker if it's broken. 
-                    match status, msg with
+                    match state.Status, msg with
                     | Resolved (Kept value), AddKeeper f    -> f value
                     | Resolved (Kept value), Value channel  -> channel.Reply(Right value)
                     | Resolved (Broken msg), AddBreaker f   -> f msg
                     | Resolved (Broken msg), Value channel  -> channel.Reply(Left msg)
                     | _, _ -> ()
-                    return! loop (status, [], [], [])
+                    return! loop (MailboxState.EmptyWithStatus(state.Status))
             }
-        loop (Pending, [], [], []))
+        loop MailboxState.Empty)
 
     let keepVow result  = mailbox.Post(Resolve (Kept result))
     let breakVow msg    = mailbox.Post(Resolve (Broken msg))
